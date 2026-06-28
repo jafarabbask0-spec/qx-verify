@@ -1,6 +1,4 @@
 const { Telegraf, Markup } = require('telegraf');
-const fs = require('fs');
-const csv = require('csv-parser');
 
 // ==================== CONFIGURATION ====================
 const BOT_TOKEN = '8841729872:AAH9XckuguVpZkOONHmI9lR-mAwtBHo1Tv4';
@@ -8,49 +6,51 @@ const AFFILIATE_LINK = 'https://broker-qx.pro/sign-up/?lid=1401543';
 const VIP_CHANNEL_LINK = 'https://t.me/+23C9bDAfba9mOGY0';
 const OWNER_USERNAME = '@QUOTEX_PRO_SIGNALS_786';
 const BOT_USERNAME = '@q_p_s_bot';
+const VERCEL_APP_URL = 'https://qx-verify.vercel.app/';
+const FIREBASE_DB_URL = 'https://qx-verify-default-rtdb.firebaseio.com/users.json';
 // =======================================================
 
 const bot = new Telegraf(BOT_TOKEN);
-const DB_FILE = './users.json';
-const CSV_FILE = './affiliates.csv';
 
-// Local Database Initialize
-if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify({}));
-}
+// Function to fetch data from Firebase Realtime Database
+async function checkTraderIdInFirebase(traderId) {
+    try {
+        const response = await fetch(FIREBASE_DB_URL);
+        if (!response.ok) return false;
+        
+        const usersData = await response.json();
+        if (!usersData) return false;
 
-// Function to read Database
-function readDB() {
-    return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-}
-
-// Function to write Database
-function writeDB(data) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-}
-
-// Function to verify Trader ID from CSV
-function checkTraderIdInCSV(traderId) {
-    return new Promise((resolve) => {
-        const ids = [];
-        if (!fs.existsSync(CSV_FILE)) {
-            resolve(false);
-            return;
+        // Loop through Firebase data to match traderId and verify status
+        for (const key in usersData) {
+            if (usersData[key] && String(usersData[key].traderId) === String(traderId)) {
+                // If your database uses a "verified" status flag, check it here
+                return true; 
+            }
         }
-        fs.createReadStream(CSV_FILE)
-            .pipe(csv())
-            .on('data', (row) => {
-                if (row.trader_id) {
-                    ids.push(row.trader_id.trim());
-                }
+        return false;
+    } catch (error) {
+        console.error("Firebase fetch error:", error);
+        return false;
+    }
+}
+
+// Function to save/update user in Firebase after successful verification
+async function saveUserToFirebase(telegramUid, traderId) {
+    try {
+        const userUrl = `https://qx-verify-default-rtdb.firebaseio.com/users/${telegramUid}.json`;
+        await fetch(userUrl, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                traderId: traderId,
+                verified: true,
+                updatedAt: new Date().toISOString()
             })
-            .on('end', () => {
-                resolve(ids.includes(traderId.trim()));
-            })
-            .on('error', () => {
-                resolve(false);
-            });
-    });
+        });
+    } catch (error) {
+        console.error("Firebase save error:", error);
+    }
 }
 
 // START COMMAND
@@ -65,6 +65,7 @@ bot.start((ctx) => {
     ctx.reply(welcomeText, Markup.inlineKeyboard([
         [Markup.button.url('📊 CREATE QUOTEX ACCOUNT', AFFILIATE_LINK)],
         [Markup.button.callback('🔍 VERIFY TRADER ID', 'VERIFY_ID')],
+        [Markup.button.url('🌐 VISIT VERIFICATION PORTAL', VERCEL_APP_URL)],
         [Markup.button.url('👨‍💻 CONTACT OWNER', `https://t.me/${OWNER_USERNAME.replace('@', '')}`)]
     ]));
 });
@@ -78,20 +79,18 @@ bot.action('VERIFY_ID', (ctx) => {
 // HANDLING TEXT MESSAGE (TRADER ID SUBMISSION)
 bot.on('text', async (ctx) => {
     const text = ctx.message.text.trim();
-    const userId = ctx.from.id.toString();
+    const telegramUid = ctx.from.id.toString();
 
-    // Check if input is a number and valid length for Trader ID
+    // Regular Expression to check if input is a digit between 6 to 12 length
     if (/^\d{6,12}$/.test(text)) {
         const traderId = text;
-        await ctx.reply('⏳ PLEASE WAIT... AAPKI ID VERIFY KI JA RAHI HAI...');
+        await ctx.reply('⏳ PLEASE WAIT... AAPKI ID FIREBASE DATABASE MEIN VERIFY KI JA RAHI HAI...');
 
-        const isApproved = await checkTraderIdInCSV(traderId);
+        const isApproved = await checkTraderIdInFirebase(traderId);
 
         if (isApproved) {
-            // Save to local JSON db
-            const db = readDB();
-            db[userId] = { traderId: traderId, verified: true, date: new Date().toISOString() };
-            writeDB(db);
+            // Save data to Firebase for sync
+            await saveUserToFirebase(telegramUid, traderId);
 
             ctx.reply(
                 `✅ CONGRATULATIONS! AAPKI TRADER ID (${traderId}) SUCCESSFULLY VERIFY HO GAYI HAI.\n\n` +
@@ -102,30 +101,30 @@ bot.on('text', async (ctx) => {
             );
         } else {
             ctx.reply(
-                `❌ SORRY! AAPKI TRADER ID (${traderId}) HAMARE AFFILIATE LINK KE UNDER NAHI HAI.\n\n` +
-                `AGAR AAPNE ABHI TAK ACCOUNT NAHI BANAYA, TO NEECHE DIYE GAYE LINK SE NEW ACCOUNT BANAYEN AUR PHIR ID SUBMIT KAREN.`,
+                `❌ SORRY! AAPKI TRADER ID (${traderId}) DATABASE MEIN NAHI MILI YA APPROVED NAHI HAI.\n\n` +
+                `AGAR AAPNE ACCOUNT NAHI BANAYA YA PORTAL PAR REGISTER NAHI KIYA, TO NEECHE DIYE GAYE LINKS KA USE KAREN.`,
                 Markup.inlineKeyboard([
                     [Markup.button.url('📊 CREATE ACCOUNT', AFFILIATE_LINK)],
+                    [Markup.button.url('🌐 PORTAL LINK', VERCEL_APP_URL)],
                     [Markup.button.callback('🔄 TRY AGAIN', 'VERIFY_ID')]
                 ])
             );
         }
     } else {
-        // Normal text handle if it's not a valid ID format
         ctx.reply('⚠️ INVALID TRADER ID FORMAT! KRIPYA SIRF NUMBERS SEND KAREN (E.G., 12345678).');
     }
 });
 
-// CATCH ERRORS TO PREVENT CRASH
+// CATCH ALL ERRORS
 bot.catch((err, ctx) => {
-    console.error(`Bot encountered an error for ${ctx.updateType}`, err);
+    console.error(`Bot error for ${ctx.updateType}`, err);
 });
 
 // LAUNCH BOT
 bot.launch().then(() => {
-    console.log('🚀 QUOTEX VERIFICATION BOT IS ONLINE AND RUNNING!');
+    console.log('🚀 QUOTEX FIREBASE BOT IS ONLINE AND RUNNING!');
 });
 
-// Enable graceful stop
+// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
